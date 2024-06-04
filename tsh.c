@@ -7,10 +7,12 @@
  * 姓名：黄雯萱
  */
 #include <stdio.h>
+#include <sched.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
 #include <ctype.h>
+#include <assert.h>
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -58,10 +60,10 @@ struct job_t jobs[MAXJOBS]; /* The job list */
 /* Function prototypes */
 
 /* Here are the functions that you will implement */
-void eval(char *cmdline);
-int builtin_cmd(char **argv);
-void do_bgfg(char **argv);
-void waitfg(pid_t pid);
+void eval(char *cmdline);       // 主流程
+int builtin_cmd(char **argv);   // 执行内置命令
+void do_bgfg(char **argv);      // 执行 fg/bg 命令
+void waitfg(pid_t pid);         // 等待fg前台进程执行结束
 
 void sigchld_handler(int sig);
 void sigtstp_handler(int sig);
@@ -71,15 +73,15 @@ void sigint_handler(int sig);
 int parseline(const char *cmdline, char **argv); 
 void sigquit_handler(int sig);
 
-void clearjob(struct job_t *job);
-void initjobs(struct job_t *jobs);
-int maxjid(struct job_t *jobs); 
+void clearjob(struct job_t *job);   // 重置 job 结构体
+void initjobs(struct job_t *jobs);  // 初始化 jobs 数组
+int maxjid(struct job_t *jobs);     // 获取当前已分配的最大 jid
 int addjob(struct job_t *jobs, pid_t pid, int state, char *cmdline);
-int deletejob(struct job_t *jobs, pid_t pid); 
-pid_t fgpid(struct job_t *jobs);
+int deletejob(struct job_t *jobs, pid_t pid);
+pid_t fgpid(struct job_t *jobs);    // 返回当前前台 job 的 pid
 struct job_t *getjobpid(struct job_t *jobs, pid_t pid);
 struct job_t *getjobjid(struct job_t *jobs, int jid); 
-int pid2jid(pid_t pid); 
+int pid2jid(pid_t pid);
 void listjobs(struct job_t *jobs);
 
 void usage(void);
@@ -172,6 +174,26 @@ int main(int argc, char **argv)
 */
 void eval(char *cmdline) 
 {
+    char *argv[MAXLINE];
+    int bg = parseline(cmdline, argv);
+    if (!bg) {
+        if(builtin_cmd(argv))   return;
+        pid_t child = fork();
+        if (child == 0) {
+            // clear jobs to prevent multiple SIGINT
+            initjobs(jobs);
+            // have no support for program searching
+            sprintf(sbuf, "/bin/%s", argv[0]);
+            execve(sbuf, argv, environ);
+        } else {
+            // this may cause a concurrent risk(unlikely)
+            addjob(jobs, child, FG, argv[0]);
+            waitfg(child);
+            assert(getjobpid(jobs, child)->state == ST);
+            deletejob(jobs, child);
+        }
+        return;
+    }
     return;
 }
 
@@ -237,7 +259,28 @@ int parseline(const char *cmdline, char **argv)
  */
 int builtin_cmd(char **argv) 
 {
-    return 0;     /* not a builtin command */
+    char *cmd = argv[0];
+    if (strcmp(cmd, "quit") == 0) {
+        // 注意，此处不能通过 kill 发一个 SIGINT 信号给自己，
+        // 因为进程收到信号退出是算作异常退出。
+        // 虽然我觉得这样更优雅。。（因为 kill(0, SIGINT) 可以给当前
+        // 进程组所有进程发送 SIGINT 信号，也即会顺便关掉所有的 bg 进程）
+        for (int i = 0; i < MAXJOBS; i ++) {
+            if (jobs[i].pid != 0) {
+                assert(jobs[i].state != ST);
+                kill(SIGINT, jobs[i].pid);
+                deletejob(jobs, jobs[i].pid);
+            }
+        }
+        exit(0);
+    } else if (strcmp(cmd, "fg") == 0 || strcmp(cmd, "bg") == 0) {
+        do_bgfg(argv);
+    } else if (strcmp(cmd, "jobs") == 0) {
+        listjobs(jobs);
+    } else {
+        return 0;   /* not a builtin command */
+    }
+    return 1;
 }
 
 /* 
@@ -253,7 +296,8 @@ void do_bgfg(char **argv)
  */
 void waitfg(pid_t pid)
 {
-    return;
+    pid_t fg = 0;
+    while ((fg = fgpid(jobs)) != 0) sched_yield();
 }
 
 /*****************
@@ -269,7 +313,8 @@ void waitfg(pid_t pid)
  */
 void sigchld_handler(int sig) 
 {
-    return;
+    struct job_t *job = getjobpid(jobs, fgpid(jobs));
+    if (job)    job->state = ST;
 }
 
 /* 
@@ -279,7 +324,11 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig) 
 {
-    return;
+    pid_t fg = fgpid(jobs);
+    if (fg != 0) {
+        kill(SIGINT, fg);
+        waitfg(fg);
+    }
 }
 
 /*
@@ -319,8 +368,8 @@ int maxjid(struct job_t *jobs)
 {
     int max=0;
     for (int i = 0; i < MAXJOBS; i++)
-	if (jobs[i].jid > max)
-	    max = jobs[i].jid;
+        if (jobs[i].jid > max)
+            max = jobs[i].jid;
     return max;
 }
 
@@ -373,8 +422,8 @@ pid_t fgpid(struct job_t *jobs) {
     int i;
 
     for (i = 0; i < MAXJOBS; i++)
-	if (jobs[i].state == FG)
-	    return jobs[i].pid;
+        if (jobs[i].state == FG)
+            return jobs[i].pid;
     return 0;
 }
 
