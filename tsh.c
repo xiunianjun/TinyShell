@@ -176,23 +176,28 @@ void eval(char *cmdline)
 {
     char *argv[MAXLINE];
     int bg = parseline(cmdline, argv);
-    if (!bg) {
-        if(builtin_cmd(argv))   return;
-        pid_t child = fork();
-        if (child == 0) {
-            // clear jobs to prevent multiple SIGINT
-            initjobs(jobs);
-            // have no support for program searching
-            sprintf(sbuf, "/bin/%s", argv[0]);
-            execve(sbuf, argv, environ);
+    if (argv[0] == NULL)    return;
+    if(builtin_cmd(argv))   return;
+    pid_t child = fork();
+    if (child == 0) {
+        // clear jobs to prevent multiple SIGINT
+        initjobs(jobs);
+
+        if (argv[0][0] == '.') {
+            getcwd(sbuf, sizeof(char) * MAXLINE);
+            sprintf(sbuf, "%s/%s", sbuf, argv[0] + 2);
+        } else if (argv[0][0] == '/') {
+            sprintf(sbuf, "%s", argv[0]);
         } else {
-            // this may cause a concurrent risk(unlikely)
-            addjob(jobs, child, FG, argv[0]);
-            waitfg(child);
-            assert(getjobpid(jobs, child)->state == ST);
-            deletejob(jobs, child);
+            sprintf(sbuf, "/bin/%s", argv[0]);
         }
-        return;
+        execve(sbuf, argv, environ);
+    } else {
+        // this may cause a concurrent risk(unlikely)
+        addjob(jobs, child, bg ? BG : FG, argv[0]);
+        if (bg) return;
+        waitfg(child);
+        assert(getjobpid(jobs, child) == NULL || getjobpid(jobs, child)->state == ST);
     }
     return;
 }
@@ -265,10 +270,19 @@ int builtin_cmd(char **argv)
         // 因为进程收到信号退出是算作异常退出。
         // 虽然我觉得这样更优雅。。（因为 kill(0, SIGINT) 可以给当前
         // 进程组所有进程发送 SIGINT 信号，也即会顺便关掉所有的 bg 进程）
+        pid_t fg = fgpid(jobs);
+        if (fg) {
+            kill(SIGINT, fg);
+            deletejob(jobs, fg);
+        }
         for (int i = 0; i < MAXJOBS; i ++) {
             if (jobs[i].pid != 0) {
-                assert(jobs[i].state != ST);
+                assert(jobs[i].state != FG);
+                // 之后验证一下是不是前台才能收到处理信号
+                // printf("kill %d\n", jobs[i].pid);
                 kill(SIGINT, jobs[i].pid);
+                char *bgfg_buf[] = {"fg"};
+                do_bgfg(bgfg_buf); // fg a smallest bg
                 deletejob(jobs, jobs[i].pid);
             }
         }
@@ -288,6 +302,9 @@ int builtin_cmd(char **argv)
  */
 void do_bgfg(char **argv) 
 {
+    // 一个运行在foreground的线程，我们可以通过SIGTSTP停止，
+    // 然后通过bg让他继续运行在后台，通过fg让它继续运行在前台；
+    // 而一个一开始运行在bg的进程，可以通过fg让他变为运行在前台。
     return;
 }
 
@@ -314,7 +331,13 @@ void waitfg(pid_t pid)
 void sigchld_handler(int sig) 
 {
     struct job_t *job = getjobpid(jobs, fgpid(jobs));
-    if (job)    job->state = ST;
+    if (job) {
+        job->state = ST;
+        int status = 0;
+        if (waitpid(job->pid, &status, WNOHANG)) {  // 正常结束
+            deletejob(jobs, job->pid);
+        }
+    }
 }
 
 /* 
@@ -324,6 +347,7 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig) 
 {
+    // printf("%d receive a sigint\n", getpid());
     pid_t fg = fgpid(jobs);
     if (fg != 0) {
         kill(SIGINT, fg);
@@ -338,7 +362,11 @@ void sigint_handler(int sig)
  */
 void sigtstp_handler(int sig) 
 {
-    return;
+    pid_t fg = fgpid(jobs);
+    if (fg != 0) {
+        kill(SIGTSTP, fg);
+        waitfg(fg);
+    }
 }
 
 /*********************
@@ -488,7 +516,7 @@ void listjobs(struct job_t *jobs)
 		    printf("listjobs: Internal error: job[%d].state=%d ", 
 			   i, jobs[i].state);
 	    }
-	    printf("%s", jobs[i].cmdline);
+	    printf("%s\n", jobs[i].cmdline);
 	}
     }
 }
@@ -553,6 +581,19 @@ handler_t *Signal(int signum, handler_t *handler)
  */
 void sigquit_handler(int sig) 
 {
+    pid_t fg = fgpid(jobs);
+    if (fg) {
+        kill(SIGINT, fg);
+        deletejob(jobs, fg);
+    }
+    for (int i = 0; i < MAXJOBS; i ++) {
+        if (jobs[i].pid != 0) {
+            kill(SIGINT, jobs[i].pid);
+            char *bgfg_buf[] = {"fg"};
+            do_bgfg(bgfg_buf);
+            deletejob(jobs, jobs[i].pid);
+        }
+    }
     printf("Terminating after receipt of SIGQUIT signal\n");
     exit(1);
 }
