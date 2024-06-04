@@ -99,6 +99,7 @@ int main(int argc, char **argv)
 
     /* Redirect stderr to stdout (so that driver will get all output
      * on the pipe connected to stdout) */
+    // 复制 fd=1 对应描述符到 fd=2 ，相当于关闭了 stderr 然后打开了一个新的 stdout
     dup2(1, 2);
 
     /* Parse the command line */
@@ -133,23 +134,22 @@ int main(int argc, char **argv)
 
     /* Execute the shell's read/eval loop */
     while (1) {
+        /* Read command line */
+        if (emit_prompt) {
+            printf("%s", prompt);
+            fflush(stdout);
+        }
+        if ((fgets(cmdline, MAXLINE, stdin) == NULL) && ferror(stdin))
+            app_error("fgets error");
+        if (feof(stdin)) { /* End of file (ctrl-d) */
+            fflush(stdout);
+            exit(0);
+        }
 
-	/* Read command line */
-	if (emit_prompt) {
-	    printf("%s", prompt);
-	    fflush(stdout);
-	}
-	if ((fgets(cmdline, MAXLINE, stdin) == NULL) && ferror(stdin))
-	    app_error("fgets error");
-	if (feof(stdin)) { /* End of file (ctrl-d) */
-	    fflush(stdout);
-	    exit(0);
-	}
-
-	/* Evaluate the command line */
-	eval(cmdline);
-	fflush(stdout);
-	fflush(stdout);
+        /* Evaluate the command line */
+        eval(cmdline);
+        fflush(stdout);
+        fflush(stdout);
     } 
 
     exit(0); /* control never reaches here */
@@ -159,9 +159,13 @@ int main(int argc, char **argv)
  * eval - Evaluate the command line that the user has just typed in
  * 
  * If the user has requested a built-in command (quit, jobs, bg or fg)
- * then execute it immediately. Otherwise, fork a child process and
- * run the job in the context of the child. If the job is running in
- * the foreground, wait for it to terminate and then return.  Note:
+ * then execute it immediately. 
+ * Otherwise, fork a child process and run the job in the context of 
+ * the child. 
+ * If the job is running in the foreground, wait for it to terminate 
+ * and then return.  
+ *
+ * Note:
  * each child process must have a unique process group ID so that our
  * background children don't receive SIGINT (SIGTSTP) from the kernel
  * when we type ctrl-c (ctrl-z) at the keyboard.  
@@ -175,7 +179,8 @@ void eval(char *cmdline)
  * parseline - Parse the command line and build the argv array.
  * 
  * Characters enclosed in single quotes are treated as a single
- * argument.  Return true if the user has requested a BG job, false if
+ * argument.
+ * Return true if the user has requested a BG job, false if
  * the user has requested a FG job.  
  */
 int parseline(const char *cmdline, char **argv) 
@@ -188,42 +193,40 @@ int parseline(const char *cmdline, char **argv)
 
     strcpy(buf, cmdline);
     buf[strlen(buf)-1] = ' ';  /* replace trailing '\n' with space */
-    while (*buf && (*buf == ' ')) /* ignore leading spaces */
-	buf++;
+    while (*buf && (*buf == ' '))   buf++;  /* ignore leading spaces */
 
     /* Build the argv list */
     argc = 0;
     if (*buf == '\'') {
-	buf++;
-	delim = strchr(buf, '\'');
+        buf++;
+        delim = strchr(buf, '\'');
     }
     else {
-	delim = strchr(buf, ' ');
+	    delim = strchr(buf, ' ');
     }
 
     while (delim) {
-	argv[argc++] = buf;
-	*delim = '\0';
-	buf = delim + 1;
-	while (*buf && (*buf == ' ')) /* ignore spaces */
-	       buf++;
+        argv[argc++] = buf;
+        *delim = '\0';
+        buf = delim + 1;
+        while (*buf && (*buf == ' ')) /* ignore spaces */
+            buf++;
 
-	if (*buf == '\'') {
-	    buf++;
-	    delim = strchr(buf, '\'');
-	}
-	else {
-	    delim = strchr(buf, ' ');
-	}
+        if (*buf == '\'') {
+            buf++;
+            delim = strchr(buf, '\'');
+        }
+        else {
+            delim = strchr(buf, ' ');
+        }
     }
     argv[argc] = NULL;
     
-    if (argc == 0)  /* ignore blank line */
-	return 1;
-
+    if (argc == 0)  return 1;   /* ignore blank line */
+	
     /* should the job run in the background? */
-    if ((bg = (*argv[argc-1] == '&')) != 0) {
-	argv[--argc] = NULL;
+    if ((bg = (*argv[argc - 1] == '&')) != 0) {
+	    argv[--argc] = NULL;
     }
     return bg;
 }
@@ -307,18 +310,15 @@ void clearjob(struct job_t *job) {
 
 /* initjobs - Initialize the job list */
 void initjobs(struct job_t *jobs) {
-    int i;
-
-    for (i = 0; i < MAXJOBS; i++)
-	clearjob(&jobs[i]);
+    for (int i = 0; i < MAXJOBS; i++)
+	    clearjob(&jobs[i]);
 }
 
 /* maxjid - Returns largest allocated job ID */
 int maxjid(struct job_t *jobs) 
 {
-    int i, max=0;
-
-    for (i = 0; i < MAXJOBS; i++)
+    int max=0;
+    for (int i = 0; i < MAXJOBS; i++)
 	if (jobs[i].jid > max)
 	    max = jobs[i].jid;
     return max;
