@@ -178,22 +178,42 @@ void eval(char *cmdline)
     int bg = parseline(cmdline, argv);
     if (argv[0] == NULL)    return;
     if(builtin_cmd(argv))   return;
+    if (argv[0][0] == '.') {
+        if (argv[0][2] != 'm') {
+            printf("%s: Command not found\n", argv[0]);
+            return;
+        }
+        if (getcwd(sbuf, sizeof(char) * MAXLINE) == NULL) {
+            printf("Error parse the cmd directory.\n");
+            return;
+        }
+        sprintf(sbuf, "%s/%s", sbuf, argv[0] + 2);
+    } else if (argv[0][0] == '/') {
+        sprintf(sbuf, "%s", argv[0]);
+    } else {
+        sprintf(sbuf, "/bin/%s", argv[0]);
+    }
+
+    sigset_t set, oldset, pendset;
+    sigemptyset(&set);
+    sigaddset(&set, SIGCHLD);
+    assert(sigprocmask(SIG_SETMASK, &set, &oldset) >= 0);
+
     pid_t child = fork();
     if (child == 0) {
-        if (argv[0][0] == '.') {
-            getcwd(sbuf, sizeof(char) * MAXLINE);
-            sprintf(sbuf, "%s/%s", sbuf, argv[0] + 2);
-        } else if (argv[0][0] == '/') {
-            sprintf(sbuf, "%s", argv[0]);
-        } else {
-            sprintf(sbuf, "/bin/%s", argv[0]);
-        }
+        assert(sigprocmask(SIG_SETMASK, &oldset, NULL) >= 0);
         setpgid(0, 0);  // prevent multiple SIGINT
         execve(sbuf, argv, environ);
     } else {
+        cmdline[strlen(cmdline) - 1] = '\0';
         // this may cause a concurrent risk(unlikely)
-        addjob(jobs, child, bg ? BG : FG, argv[0]);
-        if (bg) return;
+        addjob(jobs, child, bg ? BG : FG, cmdline);
+
+        assert(sigprocmask(SIG_SETMASK, &oldset, NULL) >= 0);
+        if (bg) {
+            printf("[%d] (%d) %s\n", pid2jid(child), child, cmdline);
+            return;
+        }
         waitfg(child);
         assert(getjobpid(jobs, child) == NULL || getjobpid(jobs, child)->state == ST);
     }
@@ -285,20 +305,28 @@ void do_bgfg(char **argv)
     assert(cmd);
     char *process = argv[1];
     if (!process) {
-        printf("%s: should have a specified pid or jid.\n", cmd);
+        printf("%s command requires PID or %%jobid argument\n", cmd);
         return;
     }
 
-    pid_t child;
+    pid_t child = 0;
     struct job_t *job = NULL;
     if (process[0] == '%') {
-        job = getjobjid(jobs, atoi(++process));
+        int atoi_res = atoi(++process);
+        job = getjobjid(jobs, atoi_res);
+        if (!job) {
+            printf("%%%d: No such job\n", atoi_res);
+            return;
+        }
+    } else if (process[0] >= '0' && process[0] <= '9') {
+        int atoi_res = atoi(process);
+        job = getjobpid(jobs, atoi_res);
+        if (!job) {
+            printf("(%d): No such process\n", atoi_res);
+            return;
+        }
     } else {
-        job = getjobpid(jobs, child);
-    }
-
-    if (!job) {
-        printf("%s: no such process.\n", cmd);
+        printf("%s: argument must be a PID or %%jobid\n", cmd);
         return;
     }
     
@@ -306,7 +334,10 @@ void do_bgfg(char **argv)
     kill(-child, SIGCONT); // 发送 SIGCONT
     int bg = (strcmp(cmd, "bg") == 0);
     job->state = (bg ? BG : FG);
-    if (bg) return;
+    if (bg) {
+        printf("[%d] (%d) %s\n", job->jid, job->pid, job->cmdline);
+        return;
+    }
     waitfg(child);
     assert(getjobpid(jobs, child) == NULL || getjobpid(jobs, child)->state == ST);
     return;
@@ -343,9 +374,13 @@ void sigchld_handler(int sig)
         }
         struct job_t *job = getjobpid(jobs, child);
         assert(job);
-        if (WIFEXITED(status) || WIFSIGNALED(status)) {
-            deletejob(jobs, child); // 正常退出 or 因 SIGINT 退出
+        if (WIFEXITED(status)) {
+            deletejob(jobs, child);
+        } else if (WIFSIGNALED(status)) {
+            printf("Job [%d] (%d) terminated by signal %d\n", job->jid, job->pid, WTERMSIG(status));
+            deletejob(jobs, child);
         } else if (WIFSTOPPED(status)) {
+            printf("Job [%d] (%d) stopped by signal %d\n", job->jid, job->pid, WSTOPSIG(status));
             job->state = ST;
         } else {
             assert(0);  // 不考虑其他情况
