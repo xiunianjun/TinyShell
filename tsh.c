@@ -180,9 +180,6 @@ void eval(char *cmdline)
     if(builtin_cmd(argv))   return;
     pid_t child = fork();
     if (child == 0) {
-        // clear jobs to prevent multiple SIGINT
-        initjobs(jobs);
-
         if (argv[0][0] == '.') {
             getcwd(sbuf, sizeof(char) * MAXLINE);
             sprintf(sbuf, "%s/%s", sbuf, argv[0] + 2);
@@ -191,6 +188,7 @@ void eval(char *cmdline)
         } else {
             sprintf(sbuf, "/bin/%s", argv[0]);
         }
+        setpgid(0, 0);  // prevent multiple SIGINT
         execve(sbuf, argv, environ);
     } else {
         // this may cause a concurrent risk(unlikely)
@@ -266,27 +264,7 @@ int builtin_cmd(char **argv)
 {
     char *cmd = argv[0];
     if (strcmp(cmd, "quit") == 0) {
-        // 注意，此处不能通过 kill 发一个 SIGINT 信号给自己，
-        // 因为进程收到信号退出是算作异常退出。
-        // 虽然我觉得这样更优雅。。（因为 kill(0, SIGINT) 可以给当前
-        // 进程组所有进程发送 SIGINT 信号，也即会顺便关掉所有的 bg 进程）
-        pid_t fg = fgpid(jobs);
-        if (fg) {
-            kill(SIGINT, fg);
-            deletejob(jobs, fg);
-        }
-        for (int i = 0; i < MAXJOBS; i ++) {
-            if (jobs[i].pid != 0) {
-                assert(jobs[i].state != FG);
-                // 之后验证一下是不是前台才能收到处理信号
-                // printf("kill %d\n", jobs[i].pid);
-                kill(SIGINT, jobs[i].pid);
-                char *bgfg_buf[] = {"fg"};
-                do_bgfg(bgfg_buf); // fg a smallest bg
-                deletejob(jobs, jobs[i].pid);
-            }
-        }
-        exit(0);
+        kill(getpid(), SIGQUIT);
     } else if (strcmp(cmd, "fg") == 0 || strcmp(cmd, "bg") == 0) {
         do_bgfg(argv);
     } else if (strcmp(cmd, "jobs") == 0) {
@@ -314,7 +292,7 @@ void do_bgfg(char **argv)
 void waitfg(pid_t pid)
 {
     pid_t fg = 0;
-    while ((fg = fgpid(jobs)) != 0) sched_yield();
+    while ((fg = fgpid(jobs)) == pid)   sched_yield();
 }
 
 /*****************
@@ -330,16 +308,24 @@ void waitfg(pid_t pid)
  */
 void sigchld_handler(int sig) 
 {
-    pid_t child = wait(0);
-    if (!child) {
-        // 当子进程收到 SIGTSTP ，会给父进程发送 SIGCHLD ，
-        // 但是 wait 不会返回其 pid 。
-        return;
+    while (1) {
+        // 使用可以设置为非阻塞状态的waitpid
+        int status;
+        pid_t child = waitpid(-1, &status, WNOHANG | WUNTRACED);
+        if (child <= 0) {
+            return;
+        }
+        struct job_t *job = getjobpid(jobs, child);
+        assert(job);
+        if (WIFEXITED(status) || WIFSIGNALED(status)) {
+            deletejob(jobs, child); // 正常退出 or 因 SIGINT 退出
+        } else if (WIFSTOPPED(status)) {
+            assert(job->state == FG);   // 前台进程收到 SIGTSTP 信号
+            job->state = ST;
+        } else {
+            assert(0);  // 不考虑其他情况
+        }
     }
-    struct job_t *job = getjobpid(jobs, child);
-    assert(job);
-    job->state = ST;
-    deletejob(jobs, child);
 }
 
 /* 
@@ -349,12 +335,12 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig) 
 {
-    // printf("%d receive a sigint\n", getpid());
     pid_t fg = fgpid(jobs);
     if (fg != 0) {
-        kill(SIGINT, fg);
+        kill(-fg, SIGINT);
         waitfg(fg);
     }
+    return;
 }
 
 /*
@@ -366,7 +352,7 @@ void sigtstp_handler(int sig)
 {
     pid_t fg = fgpid(jobs);
     if (fg != 0) {
-        kill(SIGTSTP, fg);
+        kill(-fg, SIGTSTP);
         waitfg(fg);
     }
 }
@@ -585,17 +571,17 @@ void sigquit_handler(int sig)
 {
     pid_t fg = fgpid(jobs);
     if (fg) {
-        kill(SIGINT, fg);
+        kill(-fg, SIGINT);
         deletejob(jobs, fg);
     }
     for (int i = 0; i < MAXJOBS; i ++) {
         if (jobs[i].pid != 0) {
-            kill(SIGINT, jobs[i].pid);
+            kill(-(jobs[i].pid), SIGINT);
             char *bgfg_buf[] = {"fg"};
             do_bgfg(bgfg_buf);
             deletejob(jobs, jobs[i].pid);
         }
     }
-    printf("Terminating after receipt of SIGQUIT signal\n");
-    exit(1);
+    // printf("Terminating after receipt of SIGQUIT signal\n");
+    exit(0);
 }
