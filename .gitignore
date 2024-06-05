@@ -5,3 +5,4 @@
 !trace*
 !*.pl
 !.gitignore
+!*.sh

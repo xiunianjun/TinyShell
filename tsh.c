@@ -174,6 +174,7 @@ int main(int argc, char **argv)
 */
 void eval(char *cmdline) 
 {
+    /* 格式化命令行，并且判断程序是否合理 */
     char *argv[MAXLINE];
     int bg = parseline(cmdline, argv);
     if (argv[0] == NULL)    return;
@@ -200,22 +201,24 @@ void eval(char *cmdline)
     sigfillset(&allset);
     assert(sigprocmask(SIG_SETMASK, &set, &oldset) >= 0);
 
-    pid_t child = fork();
+    pid_t child = fork();   // 创建子进程 
     if (child == 0) {
         assert(sigprocmask(SIG_SETMASK, &oldset, NULL) >= 0);
         setpgid(0, 0);  // prevent multiple SIGINT
         execve(sbuf, argv, environ);
     } else {
         cmdline[strlen(cmdline) - 1] = '\0';
+
         assert(sigprocmask(SIG_SETMASK, &allset, NULL) >= 0);
         addjob(jobs, child, bg ? BG : FG, cmdline);
         int jid = pid2jid(child);
         assert(sigprocmask(SIG_SETMASK, &oldset, NULL) >= 0);
-        if (bg) {
+
+        if (bg) {   // 背景进程无需等待结束
             printf("[%d] (%d) %s\n", jid, child, cmdline);
             return;
         }
-        waitfg(child);
+        waitfg(child);  // 等待前线进程结束
         assert(getjobpid(jobs, child) == NULL || getjobpid(jobs, child)->state == ST);
     }
     return;
@@ -285,7 +288,7 @@ int builtin_cmd(char **argv)
 {
     char *cmd = argv[0];
     if (strcmp(cmd, "quit") == 0) {
-        kill(getpid(), SIGQUIT);
+        kill(getpid(), SIGQUIT);    // 发送 SIGQUIT ，杀死所有子进程然后退出
     } else if (strcmp(cmd, "fg") == 0 || strcmp(cmd, "bg") == 0) {
         do_bgfg(argv);
     } else if (strcmp(cmd, "jobs") == 0) {
@@ -320,7 +323,7 @@ void do_bgfg(char **argv)
 
     pid_t child = 0;
     struct job_t *job = NULL;
-    if (process[0] == '%') {
+    if (process[0] == '%') {    // jid
         int atoi_res = atoi(++process);
         job = getjobjid(jobs, atoi_res);
         if (!job) {
@@ -328,7 +331,7 @@ void do_bgfg(char **argv)
             assert(sigprocmask(SIG_SETMASK, &oldset, NULL) >= 0);
             return;
         }
-    } else if (process[0] >= '0' && process[0] <= '9') {
+    } else if (process[0] >= '0' && process[0] <= '9') {    // pid
         int atoi_res = atoi(process);
         job = getjobpid(jobs, atoi_res);
         if (!job) {
@@ -377,6 +380,9 @@ void waitfg(pid_t pid)
 /*****************
  * Signal handlers
  *****************/
+/*
+    虽说 printf 是不可重入的，不过我在 sigprocmask 包围内用应该就没事吧。。
+*/
 
 /* 
  * sigchld_handler - The kernel sends a SIGCHLD to the shell whenever
@@ -388,10 +394,12 @@ void waitfg(pid_t pid)
 void sigchld_handler(int sig) 
 {
     int old_errno = errno;
+
     sigset_t set, oldset;
     sigfillset(&set);
     while (1) {
         // 使用可以设置为非阻塞状态的waitpid
+        // 无需挂起 + 捕获 STOPPED 信号
         int status;
         pid_t child = waitpid(-1, &status, WNOHANG | WUNTRACED);
         if (child <= 0) {
@@ -686,12 +694,10 @@ void sigquit_handler(int sig)
     pid_t fg = fgpid(jobs);
     if (fg) {
         kill(-fg, SIGINT);
-        deletejob(jobs, fg);
     }
     for (int i = 0; i < MAXJOBS; i ++) {
         if (jobs[i].pid != 0) {
             kill(-(jobs[i].pid), SIGINT);
-            deletejob(jobs, jobs[i].pid);
         }
     }
     assert(sigprocmask(SIG_SETMASK, &oldset, NULL) >= 0);
