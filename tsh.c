@@ -330,14 +330,16 @@ void waitfg(pid_t pid)
  */
 void sigchld_handler(int sig) 
 {
-    struct job_t *job = getjobpid(jobs, fgpid(jobs));
-    if (job) {
-        job->state = ST;
-        int status = 0;
-        if (waitpid(job->pid, &status, WNOHANG)) {  // 正常结束
-            deletejob(jobs, job->pid);
-        }
+    pid_t child = wait(0);
+    if (!child) {
+        // 当子进程收到 SIGTSTP ，会给父进程发送 SIGCHLD ，
+        // 但是 wait 不会返回其 pid 。
+        return;
     }
+    struct job_t *job = getjobpid(jobs, child);
+    assert(job);
+    job->state = ST;
+    deletejob(jobs, child);
 }
 
 /* 
