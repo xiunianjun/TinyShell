@@ -280,9 +280,35 @@ int builtin_cmd(char **argv)
  */
 void do_bgfg(char **argv) 
 {
-    // 一个运行在foreground的线程，我们可以通过SIGTSTP停止，
-    // 然后通过bg让他继续运行在后台，通过fg让它继续运行在前台；
-    // 而一个一开始运行在bg的进程，可以通过fg让他变为运行在前台。
+    /* 合理性检验 */
+    char *cmd = argv[0];
+    assert(cmd);
+    char *process = argv[1];
+    if (!process) {
+        printf("%s: should have a specified pid or jid.\n", cmd);
+        return;
+    }
+
+    pid_t child;
+    struct job_t *job = NULL;
+    if (process[0] == '%') {
+        job = getjobjid(jobs, atoi(++process));
+    } else {
+        job = getjobpid(jobs, child);
+    }
+
+    if (!job) {
+        printf("%s: no such process.\n", cmd);
+        return;
+    }
+    
+    child = job->pid;
+    kill(-child, SIGCONT); // 发送 SIGCONT
+    int bg = (strcmp(cmd, "bg") == 0);
+    job->state = (bg ? BG : FG);
+    if (bg) return;
+    waitfg(child);
+    assert(getjobpid(jobs, child) == NULL || getjobpid(jobs, child)->state == ST);
     return;
 }
 
@@ -320,7 +346,6 @@ void sigchld_handler(int sig)
         if (WIFEXITED(status) || WIFSIGNALED(status)) {
             deletejob(jobs, child); // 正常退出 or 因 SIGINT 退出
         } else if (WIFSTOPPED(status)) {
-            assert(job->state == FG);   // 前台进程收到 SIGTSTP 信号
             job->state = ST;
         } else {
             assert(0);  // 不考虑其他情况
@@ -577,8 +602,6 @@ void sigquit_handler(int sig)
     for (int i = 0; i < MAXJOBS; i ++) {
         if (jobs[i].pid != 0) {
             kill(-(jobs[i].pid), SIGINT);
-            char *bgfg_buf[] = {"fg"};
-            do_bgfg(bgfg_buf);
             deletejob(jobs, jobs[i].pid);
         }
     }
